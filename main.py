@@ -579,6 +579,42 @@ async def national_balance(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
+@bot.tree.command(name="查看已開戶用戶", description="[管理員] 查看所有已開戶的用戶名單與資產")
+async def list_registered_users(interaction: discord.Interaction):
+    if not is_admin_check(interaction):
+        await interaction.response.send_message("❌ 您沒有銀行管理員權限。", ephemeral=True)
+        return
+
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    # 排除國家帳戶 (discord_id = 0)
+    cursor.execute("SELECT discord_id, username, balance, created_at FROM users WHERE discord_id != 0 ORDER BY created_at DESC")
+    rows = cursor.fetchall()
+    conn.close()
+
+    if not rows:
+        await interaction.response.send_message("📋 目前尚無任何一般市民開戶。", ephemeral=True)
+        return
+
+    embed = discord.Embed(title="📋 新亞銀行 - 已開戶市民名單", color=discord.Color.purple())
+    
+    description_list = []
+    for r in rows:
+        d_id, uname, bal, created = r
+        time_str = created.replace('T', ' ')[:16] if created else "未知"
+        description_list.append(f"• **{uname}** (<@{d_id}>)\n  * 餘額：`{bal:,.2f}` 新亞圓\n  * 開戶時間：`{time_str}`")
+
+    # 由於 Discord Embed 欄位限制，每 10 個一組或直接放入 Description 中
+    chunked_desc = "\n\n".join(description_list)
+    if len(chunked_desc) > 4000:
+        chunked_desc = chunked_desc[:3950] + "\n...(名單過長，僅顯示部分)"
+
+    embed.description = chunked_desc
+    embed.set_footer(text=f"總計開戶人數：{len(rows)} 人")
+
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
 @bot.tree.command(name="國家定期轉帳扣款", description="[管理員] 設定國家對用戶或身分組的定期撥款/扣款")
 @app_commands.choices(對象類型=[
     app_commands.Choice(name="個別用戶", value="user"),
@@ -742,6 +778,7 @@ async def help_command(interaction: discord.Interaction):
             "• `/設管理員身分組 [身分組]` - 指定銀行管理員身分組\n"
             "• `/設銀行頻道 [頻道]` - 設定發布資訊與年終決算頻道（到帳與扣款通知亦會在此發布）\n"
             "• `/國家帳戶餘額` - 查看新亞市國家帳戶資產\n"
+            "• `/查看已開戶用戶` - 查看所有已開戶市民的名單與資產\n"
             "• `/國家定期轉帳扣款` - 設定國家每月對【個人或身分組】定期撥款/扣款\n"
             "• `/查看國家定期任務` - 列出所有運行中的國家定期任務與 ID\n"
             "• `/取消國家定期任務 [任務id]` - 取消特定的定期任務\n"
