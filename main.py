@@ -298,7 +298,7 @@ async def register(interaction: discord.Interaction, 用戶名: str):
   conn.commit()
   conn.close()
   await interaction.response.send_message(
-      f"✅ 開戶成功！歡迎加入新亞銀行，用戶名：`{用戶名}`，已獲贈開戶禮金 100.0 新亞幣。"
+      f"✅ 開戶成功！歡迎加入市營新亞銀行，用戶名：`{用戶名}`，已獲贈開戶禮金 100.0 新亞圓。"
   )
 
 
@@ -355,7 +355,7 @@ async def balance(interaction: discord.Interaction):
 
   uname, bal = row
   embed = discord.Embed(
-      title="🏦 新亞銀行 - 帳戶資訊", color=discord.Color.gold()
+      title="🏦 市營新亞銀行 - 帳戶資訊", color=discord.Color.gold()
   )
   embed.add_field(name="用戶名", value=uname, inline=True)
   embed.add_field(name="當前餘額", value=f"`{bal:,.2f}` 新亞幣", inline=True)
@@ -403,7 +403,7 @@ async def deposit(interaction: discord.Interaction, 金額: float):
   conn.commit()
   conn.close()
   await interaction.response.send_message(
-      f"✅ 成功存款 `{金額:,.2f}` 新亞幣。目前餘額：`{new_bal:,.2f}` 新亞幣。"
+      f"✅ 成功存款 `{金額:,.2f}` 新亞圓。目前餘額：`{new_bal:,.2f}` 新亞圓。"
   )
 
 
@@ -597,7 +597,7 @@ async def history(interaction: discord.Interaction):
     if sender_id == receiver_id:
       direction = t_type
     embed.add_field(
-        name=f"[{direction}] {amount:,.2f} 新亞幣",
+        name=f"[{direction}] {amount:,.2f} 新亞圓",
         value=(
             f"備忘/名義: `{memo}`\n時間:"
             f" `{timestamp.replace('T', ' ')[:19]}`"
