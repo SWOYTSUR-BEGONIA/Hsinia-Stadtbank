@@ -58,7 +58,7 @@ def init_db():
         )
     """)
 
-    # 初始化國家公帳戶 (ID設定為 0，預設金額 10 億新亞圓)
+    # 初始化國家公帳戶 (ID 0，僅在首次建立時寫入 10 億新亞圓，更新程式碼不會影響數據)
     cursor.execute("SELECT * FROM users WHERE discord_id = 0")
     if not cursor.fetchone():
         cursor.execute(
@@ -137,23 +137,28 @@ async def background_tasks():
     cursor.execute("SELECT * FROM scheduled_tasks")
     tasks_list = cursor.fetchall()
 
+    bank_channel_id = get_config("bank_channel_id")
+    bank_channel = bot.get_channel(int(bank_channel_id)) if bank_channel_id else None
+
     for t in tasks_list:
         task_id, sender_id, receiver_id, target_role_id, amount, memo, execute_at_str, is_recurring, r_day, r_hour = t
         execute_at = datetime.fromisoformat(execute_at_str)
 
         if now >= execute_at:
-            # 如果是身分組定期扣款/撥款
+            # 身分組定期扣款/撥款
             if target_role_id and target_role_id > 0:
                 guild = bot.guilds[0] if bot.guilds else None
                 if guild:
                     role = guild.get_role(target_role_id)
                     if role:
+                        count = 0
                         for member in role.members:
                             if sender_id == 0:  # 國家撥款給身分組成員
                                 cursor.execute("UPDATE users SET balance = balance + ? WHERE discord_id = ?", (amount, member.id))
                                 cursor.execute("UPDATE users SET balance = balance - ? WHERE discord_id = 0", (amount,))
                                 cursor.execute("""INSERT INTO transactions (sender_id, receiver_id, amount, memo, timestamp, type)
                                                   VALUES (0, ?, ?, ?, ?, '國家定期撥款')""", (member.id, amount, memo, now.isoformat()))
+                                count += 1
                             else:  # 身分組成員扣款給國家
                                 cursor.execute("SELECT balance FROM users WHERE discord_id = ?", (member.id,))
                                 u_row = cursor.fetchone()
@@ -162,6 +167,19 @@ async def background_tasks():
                                     cursor.execute("UPDATE users SET balance = balance + ? WHERE discord_id = 0", (amount,))
                                     cursor.execute("""INSERT INTO transactions (sender_id, receiver_id, amount, memo, timestamp, type)
                                                       VALUES (?, 0, ?, ?, ?, '國家定期扣款')""", (member.id, amount, memo, now.isoformat()))
+                                    count += 1
+                        
+                        # 發送頻道通知與 Tag 身分組
+                        if bank_channel:
+                            action_text = "發放撥款" if sender_id == 0 else "完成扣款"
+                            await bank_channel.send(
+                                f"📢【新亞市財政通知】{role.mention} 的成員請注意：\n"
+                                f"國家已成功對該身分組執行 `{action_text}`！\n"
+                                f"* 每人金額：`{amount:,.2f}` 新亞圓\n"
+                                f"* 事由名義：`{memo}`\n"
+                                f"* 受影響人數：{count} 人"
+                            )
+
             # 個別用戶執行
             else:
                 cursor.execute("SELECT balance FROM users WHERE discord_id = ?", (sender_id,))
@@ -174,9 +192,18 @@ async def background_tasks():
                     cursor.execute("UPDATE users SET balance = balance + ? WHERE discord_id = ?", (amount, receiver_id))
                     cursor.execute("""INSERT INTO transactions (sender_id, receiver_id, amount, memo, timestamp, type)
                                       VALUES (?, ?, ?, ?, ?, '定時轉帳/扣款')""", (sender_id, receiver_id, amount, memo, now.isoformat()))
+                    
+                    if bank_channel and (sender_id == 0 or receiver_id == 0):
+                        user_id = receiver_id if sender_id == 0 else sender_id
+                        action_text = "已撥入您的帳戶" if sender_id == 0 else "已從您的帳戶扣除"
+                        await bank_channel.send(
+                            f"📢【新亞市財政通知】<@{user_id}>：\n"
+                            f"國家財政款項 `{amount:,.2f}` 新亞圓 {action_text}。\n"
+                            f"* 事由名義：`{memo}`"
+                        )
 
             if is_recurring == 1:
-                # 計算下個月執行時間 (支援 1~31 號自動算最大天數)
+                # 計算下個月執行時間 (支援 1~31 號自動調適最大天數)
                 next_month = (now.month % 12) + 1
                 next_year = now.year + (1 if next_month == 1 else 0)
                 next_exec = get_next_execution_date(next_year, next_month, r_day, r_hour)
@@ -306,10 +333,7 @@ async def balance(interaction: discord.Interaction):
     embed = discord.Embed(title="🏦 市營新亞銀行 - 帳戶資訊", color=discord.Color.gold())
     embed.add_field(name="帳戶名稱", value=uname, inline=True)
     embed.add_field(name="當前餘額", value=f"`{bal:,.2f}` 新亞圓", inline=True)
-    
-    # 設置個人頭像為縮圖
-    avatar_url = interaction.user.display_avatar.url
-    embed.set_thumbnail(url=avatar_url)
+    embed.set_thumbnail(url=interaction.user.display_avatar.url)
 
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
@@ -494,19 +518,19 @@ async def national_balance(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
-@bot.tree.command(name="國家定期轉帳扣款", description="[管理員] 設定國家公帳戶對用戶或身分組的定期/定時扣款或撥款")
+@bot.tree.command(name="國家定期轉帳扣款", description="[管理員] 設定國家對用戶或身分組的定期撥款/扣款")
 @app_commands.choices(對象類型=[
     app_commands.Choice(name="個別用戶", value="user"),
     app_commands.Choice(name="整個身分組", value="role")
 ])
 @app_commands.describe(
     對象類型="選擇針對個別用戶或身分組",
-    目標用戶="（若選個別用戶）選擇對象",
-    目標身分組="（若選身分組）選擇對象身分組",
     金額="金額（正數為國家撥款，負數為國家扣款）",
     名義="財政收支事由/備忘",
     每月幾號="每月幾號執行（1-31號）",
-    執行小時="幾點執行（0-23時）"
+    執行小時="幾點執行（0-23時）",
+    目標用戶="（若選個別用戶）選擇對象",
+    目標身分組="（若選身分組）選擇對象身分組"
 )
 async def national_recurring(
     interaction: discord.Interaction,
@@ -566,9 +590,65 @@ async def national_recurring(
         f"* 對象：{target_name}\n"
         f"* 類型：`{'國家撥款' if 金額 > 0 else '國家強制扣款'}`\n"
         f"* 金額：`{abs(金額):,.2f}` 新亞圓\n"
-        f"* 週期：每個月 {每月幾號} 日 {執行小時}:00（自動調適當月最大天數）\n"
+        f"* 週期：每個月 {每月幾號} 日 {執行小時}:00\n"
         f"* 名義：`{名義}`"
     )
+
+
+@bot.tree.command(name="查看國家定期任務", description="[管理員] 查看所有運行中的國家定期撥款/扣款任務")
+async def list_recurring_tasks(interaction: discord.Interaction):
+    if not is_admin_check(interaction):
+        await interaction.response.send_message("❌ 您沒有銀行管理員權限。", ephemeral=True)
+        return
+
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, sender_id, receiver_id, target_role_id, amount, memo, recurring_day, recurring_hour FROM scheduled_tasks WHERE is_recurring = 1")
+    rows = cursor.fetchall()
+    conn.close()
+
+    if not rows:
+        await interaction.response.send_message("📋 當前沒有任何運行中的國家定期任務。", ephemeral=True)
+        return
+
+    embed = discord.Embed(title="🏛️ 國家定期財政任務清單", color=discord.Color.blue())
+    for r in rows:
+        t_id, s_id, r_id, role_id, amt, memo, r_day, r_hour = r
+        if role_id > 0:
+            target_str = f"身分組 <@&{role_id}>"
+        else:
+            u_id = r_id if s_id == 0 else s_id
+            target_str = f"用戶 <@{u_id}>"
+        
+        type_str = "國家撥款" if s_id == 0 else "國家扣款"
+        embed.add_field(
+            name=f"任務 ID: {t_id} | {type_str}",
+            value=f"* 對象: {target_str}\n* 金額: `{amt:,.2f}` 新亞圓\n* 時間: 每月 {r_day} 號 {r_hour}:00\n* 名義: `{memo}`",
+            inline=False
+        )
+
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="取消國家定期任務", description="[管理員] 取消指定的國家定期撥款/扣款任務")
+@app_commands.describe(任務id="要取消的任務 ID（可用 /查看國家定期任務 查詢）")
+async def cancel_recurring_task(interaction: discord.Interaction, 任務id: int):
+    if not is_admin_check(interaction):
+        await interaction.response.send_message("❌ 您沒有銀行管理員權限。", ephemeral=True)
+        return
+
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT id FROM scheduled_tasks WHERE id = ? AND is_recurring = 1", (任務id,))
+    if not cursor.fetchone():
+        conn.close()
+        await interaction.response.send_message(f"❌ 找不到 ID 為 `{任務id}` 的定期任務。", ephemeral=True)
+        return
+
+    cursor.execute("DELETE FROM scheduled_tasks WHERE id = ?", (任務id,))
+    conn.commit()
+    conn.close()
+    await interaction.response.send_message(f"✅ 已成功取消任務 ID `{任務id}`！")
 
 
 @bot.tree.command(name="幫助", description="檢視市營新亞銀行機器人的所有指令與說明")
@@ -585,7 +665,7 @@ async def help_command(interaction: discord.Interaction):
             "• `/開戶 [用戶名]` - 建立您的銀行帳戶（送開戶禮 100 新亞圓）\n"
             "• `/銷戶` - 銷戶並清除個人銀行帳戶資料\n"
             "• `/改名 [新用戶名]` - 變更您的帳戶名稱\n"
-            "• `/餘額` - 查看您當前的帳戶資產與顯示個人頭像\n"
+            "• `/餘額` - 查看您當前的帳戶資產與個人頭像\n"
             "• `/存款 [金額]` - 存入資金至您的帳戶\n"
             "• `/提款 [金額]` - 從帳戶提取資金\n"
             "• `/轉帳 [對象] [金額] [名義] [延遲分鐘數]` - 轉帳給他人（可選填單次預定）\n"
@@ -596,12 +676,14 @@ async def help_command(interaction: discord.Interaction):
     )
 
     embed.add_field(
-        name="🛡️ 管理員指令",
+        name="🛡️ 管理員/政府機構指令",
         value=(
             "• `/設管理員身分組 [身分組]` - 指定銀行管理員身分組\n"
-            "• `/設銀行頻道 [頻道]` - 設定發布資訊與年終決算頻道\n"
-            "• `/國家帳戶餘額` - 查看新亞市國家帳戶資產（基底 10 億新亞圓）\n"
-            "• `/國家定期轉帳扣款 [對象類型] ...` - 設定國家每月對【個人或身分組】定期撥款或扣款 (1~31號)\n"
+            "• `/設銀行頻道 [頻道]` - 設定發布資訊與年終決算頻道（到帳與扣款通知亦會在此發布）\n"
+            "• `/國家帳戶餘額` - 查看新亞市國家帳戶資產\n"
+            "• `/國家定期轉帳扣款` - 設定國家每月對【個人或身分組】定期撥款/扣款\n"
+            "• `/查看國家定期任務` - 列出所有運行中的國家定期任務與 ID\n"
+            "• `/取消國家定期任務 [任務id]` - 取消特定的定期任務\n"
             "• *(系統自動)* 每年 12 月 31 日自動發布「# 新亞市政府總決算」報告"
         ),
         inline=False
