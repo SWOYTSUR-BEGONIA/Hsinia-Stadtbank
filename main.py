@@ -397,44 +397,24 @@ async def balance(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
-@bot.tree.command(name="存款", description="將資金存入您的銀行帳戶（大額存款需受反洗錢審查）")
+@bot.tree.command(name="存款", description="將資金存入您的銀行帳戶（受每日 3 万新亞圓累計限額與反洗錢審查）")
 @app_commands.describe(金額="要存入的金額", 名義="請詳細說明資金來源/存款名義（例如：勞務薪資、商業投資收益等）")
 async def deposit(interaction: discord.Interaction, 金額: float, 名義: str):
     if 金額 <= 0:
         await interaction.response.send_message("❌ 存款金額必須大於 0。", ephemeral=True)
         return
 
-    # ==================== 巨額財富與資金來源審查邏輯 ====================
-    LARGE_AMOUNT_THRESHOLD = 100000.0  # 設定巨額審查門檻：10萬新亞圓
-    SUSPICIOUS_KEYWORDS = ["錢", "無", "不知道", "123", "abc", "隨便", "測試", "test", "aaa", "bbb", "xxx"]
-
     clean_memo = 名義.strip()
 
-    # 如果金額超過巨額門檻，進行嚴格審查
-    if 金額 >= LARGE_AMOUNT_THRESHOLD:
-        # 檢查條件 1：說明長度是否過短（少於 4 個字）
-        if len(clean_memo) < 4:
-            await interaction.response.send_message(
-                f"🚨 **存款請求已駁回！**\n"
-                f"根據《新亞市反洗錢與異常資金防範條例》，單筆存款達到或超過 `{LARGE_AMOUNT_THRESHOLD:,.2f}` 新亞圓時，"
-                f"必須提供詳細且合法的資金來源說明（至少 4 個字以上）。",
-                ephemeral=True
-            )
-            return
-
-        # 檢查條件 2：是否包含模糊或可疑關鍵字
-        if clean_memo.lower() in SUSPICIOUS_KEYWORDS:
-            await interaction.response.send_message(
-                f"🚨 **存款請求已駁回！**\n"
-                f"您填寫的資金名義 `「{名義}」` 屬於不明或不合規說明。\n"
-                f"請重新進行存款並提供明確、合法的財源證明與用途名義。",
-                ephemeral=True
-            )
-            return
-    # ==================================================================
+    # ==================== 嚴格反洗錢與日累計額度稽核（溯既往） ====================
+    DAILY_LIMIT = 30000.0  # 每日存款上限：30,000 新亞圓
+    LARGE_AMOUNT_THRESHOLD = 100000.0  # 單筆巨額審查門檻（若有需要可保留）
+    SUSPICIOUS_KEYWORDS = ["錢", "無", "不知道", "123", "abc", "隨便", "測試", "test", "aaa", "bbb", "xxx"]
 
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
+
+    # 確認用戶是否已開戶
     cursor.execute("SELECT balance FROM users WHERE discord_id = ?", (interaction.user.id,))
     row = cursor.fetchone()
     if not row:
@@ -442,21 +422,58 @@ async def deposit(interaction: discord.Interaction, 金額: float, 名義: str):
         await interaction.response.send_message("❌ 您尚未開戶，請先使用 `/開戶`。", ephemeral=True)
         return
 
-    new_bal = row[0] + 金額
+    # 【溯既往審查】計算過去 24 小時內該用戶的累計存款金額
+    now = datetime.now(timezone(timedelta(hours=8)))
+    twenty_four_hours_ago = (now - timedelta(hours=24)).isoformat()
+
+    cursor.execute("""
+        SELECT SUM(amount) FROM transactions 
+        WHERE sender_id = ? AND receiver_id = ? AND type = '存款' AND timestamp >= ?
+    """, (interaction.user.id, interaction.user.id, twenty_four_hours_ago))
+    
+    result = cursor.fetchone()
+    today_total_deposited = result[0] if result and result[0] is not None else 0.0
+
+    # 檢查是否違反「一天內累計不超過 30,000」的規定
+    if today_total_deposited + 金額 > DAILY_LIMIT:
+        conn.close()
+        await interaction.response.send_message(
+            f"🚨 **存款請求已駁回（超出每日累計限額）！**\n"
+            f"根據《新亞市反洗錢與財務安全條例》，每位市民在 24 小時內的累計存款上限為 **`{DAILY_LIMIT:,.2f}` 新亞圓**。\n"
+            f"* 您過去 24 小時內已存款：`{today_total_deposited:,.2f}` 新亞圓\n"
+            f"* 本次欲存入：`{金額:,.2f}` 新亞圓\n"
+            f"* 累計將達：`{today_total_deposited + 金額:,.2f}` 新亞圓（已超過限額）",
+            ephemeral=True
+        )
+        return
+
+    # 檢查單筆巨額模糊名義審查（保留原有的 10 萬大額過濾）
+    if 金額 >= LARGE_AMOUNT_THRESHOLD:
+        if len(clean_memo) < 4 or clean_memo.lower() in SUSPICIOUS_KEYWORDS:
+            conn.close()
+            await interaction.response.send_message(
+                f"🚨 **存款請求已駁回！**\n"
+                f"單筆金額達到或超過 `{LARGE_AMOUNT_THRESHOLD:,.2f}` 新亞圓，必須提供詳細且合法的資金來源說明（至少 4 個字以上，不得為模糊字眼）。",
+                ephemeral=True
+            )
+            return
+    # ============================================================================
+
+    current_balance = row[0]
+    new_bal = current_balance + 金額
+    
     cursor.execute("UPDATE users SET balance = ? WHERE discord_id = ?", (new_bal, interaction.user.id))
     cursor.execute("""INSERT INTO transactions (sender_id, receiver_id, amount, memo, timestamp, type)
                      VALUES (?, ?, ?, ?, ?, ?)""", 
-                   (interaction.user.id, interaction.user.id, 金額, clean_memo, datetime.now().isoformat(), "存款"))
+                   (interaction.user.id, interaction.user.id, 金額, clean_memo, now.isoformat(), "存款"))
     conn.commit()
     conn.close()
-
-    # 如果是大額存款且稽核通過，顯示安全驗證提示
-    audit_notice = "\n🛡️ *本筆大額交易已通過新亞市金融稽核系統驗證。*" if 金額 >= LARGE_AMOUNT_THRESHOLD else ""
 
     await interaction.response.send_message(
         f"✅ 成功存款 `{金額:,.2f}` 新亞圓。\n"
         f"* 資金名義：`{clean_memo}`\n"
-        f"* 當前餘額：`{new_bal:,.2f}` 新亞圓{audit_notice}"
+        f"* 過去 24 小時累計存款：`{today_total_deposited + 金額:,.2f} / {DAILY_LIMIT:,.2f}` 新亞圓\n"
+        f"* 當前帳戶餘額：`{new_bal:,.2f}` 新亞圓"
     )
 
 @bot.tree.command(name="提款", description="從您的銀行帳戶提取資金")
