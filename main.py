@@ -791,5 +791,8 @@ async def help_command(interaction: discord.Interaction):
 
 
 # 啟動機器人
-   TOKEN = "把你的_DISCORD_BOT_TOKEN_貼在這裡"
-   bot.run(TOKEN)
+TOKEN = os.getenv("DISCORD_TOKEN")
+if not TOKEN:
+  print("錯誤：找不到 DISCORD_TOKEN 環境變數！")
+else:
+  bot.run(TOKEN)
