@@ -1,76 +1,22 @@
+import asyncio
+import calendar
+from datetime import datetime, timezone, timedelta
 import os
 import sqlite3
+import discord
+from discord import app_commands
+from discord.ext import commands, tasks
 
 # 資料庫路徑：支援從環境變數讀取（用於雲端 Volume 持久化），本地測試預設為 bank.db
 DB_FILE = os.getenv("DB_PATH", "bank.db")
 
 
 def init_db():
-  # 確保資料庫所在的資料夾存在（如果是 /data/bank.db，會自動建立 /data 資料夾）
-  db_dir = os.path.dirname(DB_FILE)
-  if db_dir and not os.path.exists(db_dir):
-    os.makedirs(db_dir, exist_ok=True)
+    # 確保資料庫所在的資料夾存在（如果是 /data/bank.db，會自動建立 /data 資料夾）
+    db_dir = os.path.dirname(DB_FILE)
+    if db_dir and not os.path.exists(db_dir):
+        os.makedirs(db_dir, exist_ok=True)
 
-  conn = sqlite3.connect(DB_FILE)
-  cursor = conn.cursor()
-  # 用戶表
-  cursor.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            discord_id INTEGER PRIMARY KEY,
-            username TEXT UNIQUE,
-            balance REAL DEFAULT 0.0,
-            created_at TEXT
-        )
-    """)
-  # 交易紀錄表
-  cursor.execute("""
-        CREATE TABLE IF NOT EXISTS transactions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            sender_id INTEGER,
-            receiver_id INTEGER,
-            amount REAL,
-            memo TEXT,
-            timestamp TEXT,
-            type TEXT
-        )
-    """)
-  # 設定表
-  cursor.execute("""
-        CREATE TABLE IF NOT EXISTS config (
-            key TEXT PRIMARY KEY,
-            value TEXT
-        )
-    """)
-  # 定時/預定轉帳與扣款任務表
-  cursor.execute("""
-        CREATE TABLE IF NOT EXISTS scheduled_tasks (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            sender_id INTEGER,
-            receiver_id INTEGER,
-            target_role_id INTEGER DEFAULT 0,
-            amount REAL,
-            memo TEXT,
-            execute_at TEXT,
-            is_recurring INTEGER DEFAULT 0,
-            recurring_day INTEGER,
-            recurring_hour INTEGER
-        )
-    """)
-
-  # 初始化國家公帳戶 (ID 0，僅在首次建立時寫入 10 億新亞圓)
-  cursor.execute("SELECT * FROM users WHERE discord_id = 0")
-  if not cursor.fetchone():
-    cursor.execute(
-        "INSERT INTO users (discord_id, username, balance, created_at) VALUES"
-        " (0, '新亞市國家帳戶', 1000000000.0, ?)",
-        (datetime.now().isoformat(),),
-    )
-
-  conn.commit()
-  conn.close()
-
-
-def init_db():
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     # 用戶表
@@ -297,11 +243,11 @@ async def year_end_report_task():
                 report = f"""# 新亞市政府總決算 ({now.year}年度)
 
 ## 一、 國家公帳戶資產總覽
-* **當前總資產**：`{national_bal:,.2f}` 新亞圓
+- **當前總資產**：`{national_bal:,.2f}` 新亞圓
 
 ## 二、 年度財政總收支概況
-* **本年度財政總收入**：`{total_income:,.2f}` 新亞圓
-* **本年度財政總支出**：`{total_expense:,.2f}` 新亞圓
+- **本年度財政總收入**：`{total_income:,.2f}` 新亞圓
+- **本年度財政總支出**：`{total_expense:,.2f}` 新亞圓
 
 ## 三、 財政審計與說明
 本年度決算報告由市營新亞銀行自動結算並呈報市民查閱。"""
@@ -397,7 +343,7 @@ async def balance(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
-@bot.tree.command(name="存款", description="將資金存入您的銀行帳戶（受每日 3 万新亞圓累計限額與反洗錢審查）")
+@bot.tree.command(name="存款", description="將資金存入您的銀行帳戶（受每日 3 萬新亞圓累計限額與反洗錢審查）")
 @app_commands.describe(金額="要存入的金額", 名義="請詳細說明資金來源/存款名義（例如：勞務薪資、商業投資收益等）")
 async def deposit(interaction: discord.Interaction, 金額: float, 名義: str):
     if 金額 <= 0:
@@ -408,7 +354,7 @@ async def deposit(interaction: discord.Interaction, 金額: float, 名義: str):
 
     # ==================== 嚴格反洗錢與日累計額度稽核（溯既往） ====================
     DAILY_LIMIT = 30000.0  # 每日存款上限：30,000 新亞圓
-    LARGE_AMOUNT_THRESHOLD = 100000.0  # 單筆巨額審查門檻（若有需要可保留）
+    LARGE_AMOUNT_THRESHOLD = 100000.0  # 單筆巨額審查門檻
     SUSPICIOUS_KEYWORDS = ["錢", "無", "不知道", "123", "abc", "隨便", "測試", "test", "aaa", "bbb", "xxx"]
 
     conn = sqlite3.connect(DB_FILE)
@@ -447,7 +393,7 @@ async def deposit(interaction: discord.Interaction, 金額: float, 名義: str):
         )
         return
 
-    # 檢查單筆巨額模糊名義審查（保留原有的 10 萬大額過濾）
+    # 檢查單筆巨額模糊名義審查
     if 金額 >= LARGE_AMOUNT_THRESHOLD:
         if len(clean_memo) < 4 or clean_memo.lower() in SUSPICIOUS_KEYWORDS:
             conn.close()
@@ -475,6 +421,7 @@ async def deposit(interaction: discord.Interaction, 金額: float, 名義: str):
         f"* 過去 24 小時累計存款：`{today_total_deposited + 金額:,.2f} / {DAILY_LIMIT:,.2f}` 新亞圓\n"
         f"* 當前帳戶餘額：`{new_bal:,.2f}` 新亞圓"
     )
+
 
 @bot.tree.command(name="提款", description="從您的銀行帳戶提取資金")
 @app_commands.describe(金額="要提取的金額")
@@ -780,7 +727,7 @@ async def help_command(interaction: discord.Interaction):
             "• `/銷戶` - 銷戶並清除個人銀行帳戶資料\n"
             "• `/改名 [新用戶名]` - 變更您的帳戶名稱\n"
             "• `/餘額` - 查看您當前的帳戶資產與個人頭像\n"
-            "• `/存款 [金額] [名義]` - 存入資金至您的帳戶\n"
+            "• `/存款 [金額] [名義]` - 存入資金至您的帳戶（日累計上限 3 萬新亞圓）\n"
             "• `/提款 [金額]` - 從帳戶提取資金\n"
             "• `/轉帳 [對象] [金額] [名義] [延遲分鐘數]` - 轉帳給他人（可選填單次預定）\n"
             "• `/交易紀錄` - 查詢最近 10 筆收支明細\n"
