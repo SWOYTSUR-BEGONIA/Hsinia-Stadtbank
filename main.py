@@ -87,6 +87,40 @@ intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+def get_config(key):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT value FROM config WHERE key = ?", (key,))
+    row = cursor.fetchone()
+    conn.close()
+    return row[0] if row else None
+
+
+def set_config(key, value):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)", (key, value))
+    conn.commit()
+    conn.close()
+
+
+def is_admin_check(interaction: discord.Interaction):
+    if interaction.user.guild_permissions.administrator:
+        return True
+    admin_role_id = get_config("admin_role_id")
+    if admin_role_id:
+        role = interaction.guild.get_role(int(admin_role_id))
+        if role and role in interaction.user.roles:
+            return True
+    return False
+
+
+def get_next_execution_date(year, month, target_day, target_hour):
+    """計算下一個執行時間，若目標日超過該月最大天數，取該月最後一天"""
+    max_days = calendar.monthrange(year, month)[1]
+    actual_day = min(target_day, max_days)
+    return datetime(year, month, actual_day, target_hour, 0, 0, tzinfo=timezone(timedelta(hours=8)))
+
 class PaginatorView(discord.ui.View):
 
   def __init__(
@@ -153,41 +187,6 @@ class PaginatorView(discord.ui.View):
       await interaction.response.edit_message(
           embed=self.get_current_embed(), view=self
       )
-
-def get_config(key):
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute("SELECT value FROM config WHERE key = ?", (key,))
-    row = cursor.fetchone()
-    conn.close()
-    return row[0] if row else None
-
-
-def set_config(key, value):
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute("INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)", (key, value))
-    conn.commit()
-    conn.close()
-
-
-def is_admin_check(interaction: discord.Interaction):
-    if interaction.user.guild_permissions.administrator:
-        return True
-    admin_role_id = get_config("admin_role_id")
-    if admin_role_id:
-        role = interaction.guild.get_role(int(admin_role_id))
-        if role and role in interaction.user.roles:
-            return True
-    return False
-
-
-def get_next_execution_date(year, month, target_day, target_hour):
-    """計算下一個執行時間，若目標日超過該月最大天數，取該月最後一天"""
-    max_days = calendar.monthrange(year, month)[1]
-    actual_day = min(target_day, max_days)
-    return datetime(year, month, actual_day, target_hour, 0, 0, tzinfo=timezone(timedelta(hours=8)))
-
 
 @bot.event
 async def on_ready():
