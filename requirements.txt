@@ -1,2 +1,1 @@
-pip install discord.py
 discord.py>=2.3.2
