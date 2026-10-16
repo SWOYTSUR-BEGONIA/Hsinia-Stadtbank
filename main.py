@@ -451,7 +451,7 @@ async def deposit(interaction: discord.Interaction, 金額: float, 名義: str):
         conn.close()
         await interaction.response.send_message(
             f"🚨 **存款請求已駁回（超出每日累計限額）！**\n"
-            f"根據《新亞市反洗錢與財務安全條例》，每位市民在 24 小時內的累計存款上限為 **`{DAILY_LIMIT:,.2f}` 新亞圓**。\n"
+            f"根據《市營新亞銀行條例》，每位市民在 24 小時內的累計存款上限為 **`{DAILY_LIMIT:,.2f}` 新亞圓**。\n"
             f"* 您過去 24 小時內已存款：`{today_total_deposited:,.2f}` 新亞圓\n"
             f"* 本次欲存入：`{金額:,.2f}` 新亞圓\n"
             f"* 累計將達：`{today_total_deposited + 金額:,.2f}` 新亞圓（已超過限額）",
