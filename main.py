@@ -6,13 +6,16 @@ import sqlite3
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
+from dotenv import load_dotenv
 
-# 資料庫路徑：支援從環境變數讀取（用於雲端 Volume 持久化），本地測試預設為 bank.db
+# 自動載入 .env 檔案
+load_dotenv()
+
+# 資料庫路徑
 DB_FILE = os.getenv("DB_PATH", "bank.db")
 
 
 def init_db():
-    # 確保資料庫所在的資料夾存在（如果是 /data/bank.db，會自動建立 /data 資料夾）
     db_dir = os.path.dirname(DB_FILE)
     if db_dir and not os.path.exists(db_dir):
         os.makedirs(db_dir, exist_ok=True)
@@ -47,7 +50,7 @@ def init_db():
             value TEXT
         )
     """)
-    # 定時/預定轉帳與扣款任務表
+    # 定時/預定任務表
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS scheduled_tasks (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -63,7 +66,7 @@ def init_db():
         )
     """)
 
-    # 初始化國家公帳戶 (ID 0，僅在首次建立時寫入 10 億新亞圓，更新程式碼不會影響數據)
+    # 初始化國家公帳戶 (ID 0)
     cursor.execute("SELECT * FROM users WHERE discord_id = 0")
     if not cursor.fetchone():
         cursor.execute(
@@ -77,7 +80,7 @@ def init_db():
 
 init_db()
 
-# 機器人設定
+# 機器人 Intent 設定（必須開啟 members 才能抓取身分組成員）
 intents = discord.Intents.default()
 intents.members = True
 intents.message_content = True
@@ -114,7 +117,6 @@ def is_admin_check(interaction: discord.Interaction):
 
 
 def get_next_execution_date(year, month, target_day, target_hour):
-    """計算下一個執行時間，若目標日超過該月最大天數，取該月最後一天"""
     max_days = calendar.monthrange(year, month)[1]
     actual_day = min(target_day, max_days)
     return datetime(year, month, actual_day, target_hour, 0, 0, tzinfo=timezone(timedelta(hours=8)))
@@ -124,123 +126,118 @@ def get_next_execution_date(year, month, target_day, target_hour):
 async def on_ready():
     print(f"登入成功：{bot.user} (ID: {bot.user.id})")
     try:
+        # 強制同步所有 Slash 指令到 Discord 伺服器
         synced = await bot.tree.sync()
-        print(f"已同步 {len(synced)} 個 Slash 指令")
+        print(f"已成功同步 {len(synced)} 個 Slash 指令！")
     except Exception as e:
-        print(e)
-    background_tasks.start()
-    year_end_report_task.start()
+        print(f"同步指令失敗: {e}")
+    
+    if not background_tasks.is_running():
+        background_tasks.start()
+    if not year_end_report_task.is_running():
+        year_end_report_task.start()
 
 
-# 背景定時任務檢查器 (每分鐘執行一次)
+# 背景定時任務檢查器
 @tasks.loop(minutes=1)
 async def background_tasks():
-    now = datetime.now(timezone(timedelta(hours=8)))
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
+    try:
+        now = datetime.now(timezone(timedelta(hours=8)))
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
 
-    cursor.execute("SELECT * FROM scheduled_tasks")
-    tasks_list = cursor.fetchall()
+        cursor.execute("SELECT * FROM scheduled_tasks")
+        tasks_list = cursor.fetchall()
 
-    bank_channel_id = get_config("bank_channel_id")
-    bank_channel = bot.get_channel(int(bank_channel_id)) if bank_channel_id else None
+        bank_channel_id = get_config("bank_channel_id")
+        bank_channel = bot.get_channel(int(bank_channel_id)) if bank_channel_id else None
 
-    for t in tasks_list:
-        task_id, sender_id, receiver_id, target_role_id, amount, memo, execute_at_str, is_recurring, r_day, r_hour = t
-        execute_at = datetime.fromisoformat(execute_at_str)
+        for t in tasks_list:
+            task_id, sender_id, receiver_id, target_role_id, amount, memo, execute_at_str, is_recurring, r_day, r_hour = t
+            execute_at = datetime.fromisoformat(execute_at_str)
 
-        if now >= execute_at:
-            # 身分組定期扣款/撥款
-            if target_role_id and target_role_id > 0:
-                guild = bot.guilds[0] if bot.guilds else None
-                if guild:
-                    role = guild.get_role(target_role_id)
-                    if role:
-                        count = 0
-                        for member in role.members:
-                            if sender_id == 0:  # 國家撥款給身分組成員
-                                cursor.execute("UPDATE users SET balance = balance + ? WHERE discord_id = ?", (amount, member.id))
-                                cursor.execute("UPDATE users SET balance = balance - ? WHERE discord_id = 0", (amount,))
-                                cursor.execute("""INSERT INTO transactions (sender_id, receiver_id, amount, memo, timestamp, type)
-                                                  VALUES (0, ?, ?, ?, ?, '國家定期撥款')""", (member.id, amount, memo, now.isoformat()))
-                                count += 1
-                            else:  # 身分組成員扣款給國家
-                                cursor.execute("SELECT balance FROM users WHERE discord_id = ?", (member.id,))
-                                u_row = cursor.fetchone()
-                                if u_row and u_row[0] >= amount:
-                                    cursor.execute("UPDATE users SET balance = balance - ? WHERE discord_id = ?", (amount, member.id))
-                                    cursor.execute("UPDATE users SET balance = balance + ? WHERE discord_id = 0", (amount,))
+            if now >= execute_at:
+                if target_role_id and target_role_id > 0:
+                    guild = bot.guilds[0] if bot.guilds else None
+                    if guild:
+                        role = guild.get_role(target_role_id)
+                        if role:
+                            count = 0
+                            for member in role.members:
+                                if sender_id == 0:  # 國家撥款
+                                    cursor.execute("UPDATE users SET balance = balance + ? WHERE discord_id = ?", (amount, member.id))
+                                    cursor.execute("UPDATE users SET balance = balance - ? WHERE discord_id = 0", (amount,))
                                     cursor.execute("""INSERT INTO transactions (sender_id, receiver_id, amount, memo, timestamp, type)
-                                                      VALUES (?, 0, ?, ?, ?, '國家定期扣款')""", (member.id, amount, memo, now.isoformat()))
+                                                      VALUES (0, ?, ?, ?, ?, '國家定期撥款')""", (member.id, amount, memo, now.isoformat()))
                                     count += 1
-                        
-                        # 發送頻道通知與 Tag 身分組
-                        if bank_channel:
-                            action_text = "發放撥款" if sender_id == 0 else "完成扣款"
-                            await bank_channel.send(
-                                f"📢【新亞市財政通知】{role.mention} 的成員請注意：\n"
-                                f"國家已成功對該身分組執行 `{action_text}`！\n"
-                                f"* 每人金額：`{amount:,.2f}` 新亞圓\n"
-                                f"* 事由名義：`{memo}`\n"
-                                f"* 受影響人數：{count} 人"
-                            )
+                                else:  # 國家扣款
+                                    cursor.execute("SELECT balance FROM users WHERE discord_id = ?", (member.id,))
+                                    u_row = cursor.fetchone()
+                                    if u_row and u_row[0] >= amount:
+                                        cursor.execute("UPDATE users SET balance = balance - ? WHERE discord_id = ?", (amount, member.id))
+                                        cursor.execute("UPDATE users SET balance = balance + ? WHERE discord_id = 0", (amount,))
+                                        cursor.execute("""INSERT INTO transactions (sender_id, receiver_id, amount, memo, timestamp, type)
+                                                          VALUES (?, 0, ?, ?, ?, '國家定期扣款')""", (member.id, amount, memo, now.isoformat()))
+                                        count += 1
+                            
+                            if bank_channel:
+                                action_text = "發放撥款" if sender_id == 0 else "完成扣款"
+                                try:
+                                    await bank_channel.send(
+                                        f"📢【新亞市財政通知】{role.mention} 的成員請注意：\n"
+                                        f"國家已成功對該身分組執行 `{action_text}`！\n"
+                                        f"* 每人金額：`{amount:,.2f}` 新亞圓\n"
+                                        f"* 事由名義：`{memo}`\n"
+                                        f"* 受影響人數：{count} 人"
+                                    )
+                                except Exception:
+                                    pass
+                else:
+                    cursor.execute("SELECT balance FROM users WHERE discord_id = ?", (sender_id,))
+                    sender_row = cursor.fetchone()
+                    cursor.execute("SELECT balance FROM users WHERE discord_id = ?", (receiver_id,))
+                    receiver_row = cursor.fetchone()
 
-            # 個別用戶執行
-            else:
-                cursor.execute("SELECT balance FROM users WHERE discord_id = ?", (sender_id,))
-                sender_row = cursor.fetchone()
-                cursor.execute("SELECT balance FROM users WHERE discord_id = ?", (receiver_id,))
-                receiver_row = cursor.fetchone()
+                    if sender_row and receiver_row and sender_row[0] >= amount:
+                        cursor.execute("UPDATE users SET balance = balance - ? WHERE discord_id = ?", (amount, sender_id))
+                        cursor.execute("UPDATE users SET balance = balance + ? WHERE discord_id = ?", (amount, receiver_id))
+                        cursor.execute("""INSERT INTO transactions (sender_id, receiver_id, amount, memo, timestamp, type)
+                                          VALUES (?, ?, ?, ?, ?, '定時轉帳/扣款')""", (sender_id, receiver_id, amount, memo, now.isoformat()))
 
-                if sender_row and receiver_row and sender_row[0] >= amount:
-                    cursor.execute("UPDATE users SET balance = balance - ? WHERE discord_id = ?", (amount, sender_id))
-                    cursor.execute("UPDATE users SET balance = balance + ? WHERE discord_id = ?", (amount, receiver_id))
-                    cursor.execute("""INSERT INTO transactions (sender_id, receiver_id, amount, memo, timestamp, type)
-                                      VALUES (?, ?, ?, ?, ?, '定時轉帳/扣款')""", (sender_id, receiver_id, amount, memo, now.isoformat()))
-                    
-                    if bank_channel and (sender_id == 0 or receiver_id == 0):
-                        user_id = receiver_id if sender_id == 0 else sender_id
-                        action_text = "已撥入您的帳戶" if sender_id == 0 else "已從您的帳戶扣除"
-                        await bank_channel.send(
-                            f"📢【新亞市財政通知】<@{user_id}>：\n"
-                            f"國家財政款項 `{amount:,.2f}` 新亞圓 {action_text}。\n"
-                            f"* 事由名義：`{memo}`"
-                        )
+                if is_recurring == 1:
+                    next_month = (now.month % 12) + 1
+                    next_year = now.year + (1 if next_month == 1 else 0)
+                    next_exec = get_next_execution_date(next_year, next_month, r_day, r_hour)
+                    cursor.execute("UPDATE scheduled_tasks SET execute_at = ? WHERE id = ?", (next_exec.isoformat(), task_id))
+                else:
+                    cursor.execute("DELETE FROM scheduled_tasks WHERE id = ?", (task_id,))
 
-            if is_recurring == 1:
-                # 計算下個月執行時間 (支援 1~31 號自動調適最大天數)
-                next_month = (now.month % 12) + 1
-                next_year = now.year + (1 if next_month == 1 else 0)
-                next_exec = get_next_execution_date(next_year, next_month, r_day, r_hour)
-
-                cursor.execute("UPDATE scheduled_tasks SET execute_at = ? WHERE id = ?", (next_exec.isoformat(), task_id))
-            else:
-                cursor.execute("DELETE FROM scheduled_tasks WHERE id = ?", (task_id,))
-
-    conn.commit()
-    conn.close()
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"背景任務異常: {e}")
 
 
-# 每年年底自動發布總決算任務 (12月31日 23:59)
 @tasks.loop(hours=12)
 async def year_end_report_task():
-    now = datetime.now(timezone(timedelta(hours=8)))
-    if now.month == 12 and now.day == 31:
-        channel_id = get_config("bank_channel_id")
-        if channel_id:
-            channel = bot.get_channel(int(channel_id))
-            if channel:
-                conn = sqlite3.connect(DB_FILE)
-                cursor = conn.cursor()
-                cursor.execute("SELECT SUM(amount) FROM transactions WHERE receiver_id = 0")
-                total_income = cursor.fetchone()[0] or 0.0
-                cursor.execute("SELECT SUM(amount) FROM transactions WHERE sender_id = 0")
-                total_expense = cursor.fetchone()[0] or 0.0
-                cursor.execute("SELECT balance FROM users WHERE discord_id = 0")
-                national_bal = cursor.fetchone()[0]
-                conn.close()
+    try:
+        now = datetime.now(timezone(timedelta(hours=8)))
+        if now.month == 12 and now.day == 31:
+            channel_id = get_config("bank_channel_id")
+            if channel_id:
+                channel = bot.get_channel(int(channel_id))
+                if channel:
+                    conn = sqlite3.connect(DB_FILE)
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT SUM(amount) FROM transactions WHERE receiver_id = 0")
+                    total_income = cursor.fetchone()[0] or 0.0
+                    cursor.execute("SELECT SUM(amount) FROM transactions WHERE sender_id = 0")
+                    total_expense = cursor.fetchone()[0] or 0.0
+                    cursor.execute("SELECT balance FROM users WHERE discord_id = 0")
+                    national_bal = cursor.fetchone()[0]
+                    conn.close()
 
-                report = f"""# 新亞市政府總決算 ({now.year}年度)
+                    report = f"""# 新亞市政府總決算 ({now.year}年度)
 
 ## 一、 國家公帳戶資產總覽
 - **當前總資產**：`{national_bal:,.2f}` 新亞圓
@@ -251,7 +248,9 @@ async def year_end_report_task():
 
 ## 三、 財政審計與說明
 本年度決算報告由市營新亞銀行自動結算並呈報市民查閱。"""
-                await channel.send(report)
+                    await channel.send(report)
+    except Exception as e:
+        print(f"年終決算報告發布失敗: {e}")
 
 
 # ==================== 一般用戶指令 ====================
@@ -344,23 +343,20 @@ async def balance(interaction: discord.Interaction):
 
 
 @bot.tree.command(name="存款", description="將資金存入您的銀行帳戶（受每日 3 萬新亞圓累計限額與反洗錢審查）")
-@app_commands.describe(金額="要存入的金額", 名義="請詳細說明資金來源/存款名義（例如：勞務薪資、商業投資收益等）")
+@app_commands.describe(金額="要存入的金額", 名義="請詳細說明資金來源/存款名義")
 async def deposit(interaction: discord.Interaction, 金額: float, 名義: str):
     if 金額 <= 0:
         await interaction.response.send_message("❌ 存款金額必須大於 0。", ephemeral=True)
         return
 
     clean_memo = 名義.strip()
-
-    # ==================== 嚴格反洗錢與日累計額度稽核（溯既往） ====================
-    DAILY_LIMIT = 30000.0  # 每日存款上限：30,000 新亞圓
-    LARGE_AMOUNT_THRESHOLD = 100000.0  # 單筆巨額審查門檻
+    DAILY_LIMIT = 30000.0
+    LARGE_AMOUNT_THRESHOLD = 100000.0
     SUSPICIOUS_KEYWORDS = ["錢", "無", "不知道", "123", "abc", "隨便", "測試", "test", "aaa", "bbb", "xxx"]
 
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
 
-    # 確認用戶是否已開戶
     cursor.execute("SELECT balance FROM users WHERE discord_id = ?", (interaction.user.id,))
     row = cursor.fetchone()
     if not row:
@@ -368,7 +364,6 @@ async def deposit(interaction: discord.Interaction, 金額: float, 名義: str):
         await interaction.response.send_message("❌ 您尚未開戶，請先使用 `/開戶`。", ephemeral=True)
         return
 
-    # 【溯既往審查】計算過去 24 小時內該用戶的累計存款金額
     now = datetime.now(timezone(timedelta(hours=8)))
     twenty_four_hours_ago = (now - timedelta(hours=24)).isoformat()
 
@@ -380,30 +375,25 @@ async def deposit(interaction: discord.Interaction, 金額: float, 名義: str):
     result = cursor.fetchone()
     today_total_deposited = result[0] if result and result[0] is not None else 0.0
 
-    # 檢查是否違反「一天內累計不超過 30,000」的規定
     if today_total_deposited + 金額 > DAILY_LIMIT:
         conn.close()
         await interaction.response.send_message(
             f"🚨 **存款請求已駁回（超出每日累計限額）！**\n"
-            f"根據《新亞市反洗錢與財務安全條例》，每位市民在 24 小時內的累計存款上限為 **`{DAILY_LIMIT:,.2f}` 新亞圓**。\n"
-            f"* 您過去 24 小時內已存款：`{today_total_deposited:,.2f}` 新亞圓\n"
-            f"* 本次欲存入：`{金額:,.2f}` 新亞圓\n"
-            f"* 累計將達：`{today_total_deposited + 金額:,.2f}` 新亞圓（已超過限額）",
+            f"每位市民在 24 小時內的累計存款上限為 **`{DAILY_LIMIT:,.2f}` 新亞圓**。\n"
+            f"* 您過去 24 小時已存款：`{today_total_deposited:,.2f}` 新亞圓\n"
+            f"* 本次欲存入：`{金額:,.2f}` 新亞圓",
             ephemeral=True
         )
         return
 
-    # 檢查單筆巨額模糊名義審查
     if 金額 >= LARGE_AMOUNT_THRESHOLD:
         if len(clean_memo) < 4 or clean_memo.lower() in SUSPICIOUS_KEYWORDS:
             conn.close()
             await interaction.response.send_message(
-                f"🚨 **存款請求已駁回！**\n"
-                f"單筆金額達到或超過 `{LARGE_AMOUNT_THRESHOLD:,.2f}` 新亞圓，必須提供詳細且合法的資金來源說明（至少 4 個字以上，不得為模糊字眼）。",
+                f"🚨 **存款請求已駁回！** 單筆金額達到或超過 `{LARGE_AMOUNT_THRESHOLD:,.2f}` 新亞圓，必須提供詳細且合法的資金來源說明（至少 4 個字以上）。",
                 ephemeral=True
             )
             return
-    # ============================================================================
 
     current_balance = row[0]
     new_bal = current_balance + 金額
@@ -452,8 +442,8 @@ async def withdraw(interaction: discord.Interaction, 金額: float):
     await interaction.response.send_message(f"✅ 成功提款 `{金額:,.2f}` 新亞圓。目前餘額：`{new_bal:,.2f}` 新亞圓。")
 
 
-@bot.tree.command(name="轉帳", description="轉帳給其他用戶（支援單次預定時間）")
-@app_commands.describe(對象="收款用戶", 金額="轉帳金額", 名義="轉帳名義/備忘錄", 延遲分鐘數="（選填）幾分鐘後執行轉帳")
+@bot.tree.command(name="轉帳", description="轉帳給其他用戶")
+@app_commands.describe(對象="收款用戶", 金額="轉帳金額", 名義="轉帳名義/備忘錄", 延遲分鐘數="（選填）幾分鐘後執行")
 async def transfer(interaction: discord.Interaction, 對象: discord.User, 金額: float, 名義: str, 延遲分鐘數: int = 0):
     if 金額 <= 0:
         await interaction.response.send_message("❌ 轉帳金額必須大於 0。", ephemeral=True)
@@ -488,7 +478,7 @@ async def transfer(interaction: discord.Interaction, 對象: discord.User, 金�
                        VALUES (?, ?, ?, ?, ?, 0)""", (interaction.user.id, 對象.id, 金額, 名義, execute_time.isoformat()))
         conn.commit()
         conn.close()
-        await interaction.response.send_message(f"⏰ 預定轉帳設定成功！將於 {延遲分鐘數} 分鐘後自動轉帳 `{金額:,.2f}` 新亞圓給 {對象.mention}。名義：`{名義}`")
+        await interaction.response.send_message(f"⏰ 預定轉帳設定成功！將於 {延遲分鐘數} 分鐘後自動轉帳給 {對象.mention}。")
     else:
         if sender_row[0] < 金額:
             conn.close()
@@ -543,7 +533,7 @@ async def history(interaction: discord.Interaction):
 @app_commands.describe(身分組="選擇 Discord 身分組")
 async def set_admin_role(interaction: discord.Interaction, 身分組: discord.Role):
     if not interaction.user.guild_permissions.administrator:
-        await interaction.response.send_message("❌ 您沒有權限執行此指令（需要伺服器管理員權限）。", ephemeral=True)
+        await interaction.response.send_message("❌ 需要伺服器管理員權限。", ephemeral=True)
         return
 
     set_config("admin_role_id", str(身分組.id))
@@ -579,7 +569,7 @@ async def national_balance(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
-@bot.tree.command(name="查看已開戶用戶", description="[管理員] 查看所有已開戶的用戶名單與資產")
+@bot.tree.command(name="查看已開戶用戶", description="[管理員] 查看所有已開戶的用戶名單")
 async def list_registered_users(interaction: discord.Interaction):
     if not is_admin_check(interaction):
         await interaction.response.send_message("❌ 您沒有銀行管理員權限。", ephemeral=True)
@@ -587,7 +577,6 @@ async def list_registered_users(interaction: discord.Interaction):
 
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    # 排除國家帳戶 (discord_id = 0)
     cursor.execute("SELECT discord_id, username, balance, created_at FROM users WHERE discord_id != 0 ORDER BY created_at DESC")
     rows = cursor.fetchall()
     conn.close()
@@ -597,22 +586,16 @@ async def list_registered_users(interaction: discord.Interaction):
         return
 
     embed = discord.Embed(title="📋 新亞銀行 - 已開戶市民名單", color=discord.Color.purple())
-    
     description_list = []
     for r in rows:
         d_id, uname, bal, created = r
         time_str = created.replace('T', ' ')[:16] if created else "未知"
         description_list.append(f"• **{uname}** (<@{d_id}>)\n  * 餘額：`{bal:,.2f}` 新亞圓\n  * 開戶時間：`{time_str}`")
 
-    # 由於 Discord Embed 欄位限制，每 10 個一組或直接放入 Description 中
-    chunked_desc = "\n\n".join(description_list)
-    if len(chunked_desc) > 4000:
-        chunked_desc = chunked_desc[:3950] + "\n...(名單過長，僅顯示部分)"
-
-    embed.description = chunked_desc
+    embed.description = "\n\n".join(description_list)[:4000]
     embed.set_footer(text=f"總計開戶人數：{len(rows)} 人")
-
     await interaction.response.send_message(embed=embed, ephemeral=True)
+
 
 @bot.tree.command(name="批量身分組開戶", description="[管理員] 為選取身分組內的所有未開戶成員自動批次開戶")
 @app_commands.describe(目標身分組="選擇要自動開戶的身分組")
@@ -621,7 +604,6 @@ async def batch_register_role(interaction: discord.Interaction, 目標身分組:
         await interaction.response.send_message("❌ 您沒有銀行管理員權限。", ephemeral=True)
         return
 
-    # 防止開戶人數過多導致 Discord 3 秒超時，先延遲回應
     await interaction.response.defer(ephemeral=True)
 
     conn = sqlite3.connect(DB_FILE)
@@ -631,7 +613,7 @@ async def batch_register_role(interaction: discord.Interaction, 目標身分組:
     skipped_count = 0
 
     for member in 目標身分組.members:
-        if member.bot:  # 自動跳過機器人
+        if member.bot:
             continue
 
         cursor.execute("SELECT * FROM users WHERE discord_id = ?", (member.id,))
@@ -639,7 +621,6 @@ async def batch_register_role(interaction: discord.Interaction, 目標身分組:
             skipped_count += 1
             continue
 
-        # 以成員的顯示名稱作為預設帳戶名，若有重複則自動加上數字編號
         base_username = member.display_name
         final_username = base_username
         counter = 1
@@ -651,7 +632,6 @@ async def batch_register_role(interaction: discord.Interaction, 目標身分組:
             final_username = f"{base_username}_{counter}"
             counter += 1
 
-        # 寫入開戶資料，每人獲得 100 新亞圓開戶禮金
         cursor.execute(
             "INSERT INTO users (discord_id, username, balance, created_at) VALUES (?, ?, ?, ?)",
             (member.id, final_username, 100.0, datetime.now().isoformat())
@@ -664,40 +644,27 @@ async def batch_register_role(interaction: discord.Interaction, 目標身分組:
     await interaction.followup.send(
         f"✅ **批量身分組開戶完成！**\n"
         f"* 目標身分組：{目標身分組.mention}\n"
-        f"* 成功自動開戶：`{success_count}` 人（每人獲贈 100.00 新亞圓禮金）\n"
+        f"* 成功自動開戶：`{success_count}` 人（每人獲贈 100.00 新亞圓）\n"
         f"* 已擁有帳戶跳過：`{skipped_count}` 人"
     )
+
 
 @bot.tree.command(name="國家定期轉帳扣款", description="[管理員] 設定國家對用戶或身分組的定期撥款/扣款")
 @app_commands.choices(對象類型=[
     app_commands.Choice(name="個別用戶", value="user"),
     app_commands.Choice(name="整個身分組", value="role")
 ])
-@app_commands.describe(
-    對象類型="選擇針對個別用戶或身分組",
-    金額="金額（正數為國家撥款，負數為國家扣款）",
-    名義="財政收支事由/備忘",
-    每月幾號="每月幾號執行（1-31號）",
-    執行小時="幾點執行（0-24時）",
-    目標用戶="（若選個別用戶）選擇對象",
-    目標身分組="（若選身分組）選擇對象身分組"
-)
+@app_commands.describe(對象類型="選擇類型", 金額="金額（正數撥款，負數扣款）", 名義="事由", 每月幾號="1-31號", 執行小時="0-23時", 目標用戶="對象用戶", 目標身分組="對象身分組")
 async def national_recurring(
-    interaction: discord.Interaction,
-    對象類型: str,
-    金額: float,
-    名義: str,
-    每月幾號: int,
-    執行小時: int,
-    目標用戶: discord.User = None,
-    目標身分組: discord.Role = None
+    interaction: discord.Interaction, 對象類型: str, 金額: float, 名義: str, 每月幾號: int, 執行小時: int,
+    目標用戶: discord.User = None, 目標身分組: discord.Role = None
 ):
     if not is_admin_check(interaction):
         await interaction.response.send_message("❌ 您沒有銀行管理員權限。", ephemeral=True)
         return
 
-    if not (1 <= 每月幾號 <= 31) or not (0 <= 執行小時 <= 24):
-        await interaction.response.send_message("❌ 日期請設定在 1-31 之間，小時請設定在 0-24 之間。", ephemeral=True)
+    if not (1 <= 每月幾號 <= 31) or not (0 <= 執行小時 <= 23):
+        await interaction.response.send_message("❌ 日期請設定在 1-31 之間，小時請設定在 0-23 之間。", ephemeral=True)
         return
 
     if 對象類型 == "user" and not 目標用戶:
@@ -736,16 +703,11 @@ async def national_recurring(
     conn.close()
 
     await interaction.response.send_message(
-        f"🏛️ 國家定期財政任務已設立！\n"
-        f"* 對象：{target_name}\n"
-        f"* 類型：`{'國家撥款' if 金額 > 0 else '國家強制扣款'}`\n"
-        f"* 金額：`{abs(金額):,.2f}` 新亞圓\n"
-        f"* 週期：每個月 {每月幾號} 日 {執行小時}:00\n"
-        f"* 名義：`{名義}`"
+        f"🏛️ 國家定期財政任務已設立！\n* 對象：{target_name}\n* 金額：`{abs(金額):,.2f}` 新亞圓\n* 週期：每個月 {每月幾號} 號 {執行小時}:00"
     )
 
 
-@bot.tree.command(name="查看國家定期任務", description="[管理員] 查看所有運行中的國家定期撥款/扣款任務")
+@bot.tree.command(name="查看國家定期任務", description="[管理員] 查看所有運行中的國家定期任務")
 async def list_recurring_tasks(interaction: discord.Interaction):
     if not is_admin_check(interaction):
         await interaction.response.send_message("❌ 您沒有銀行管理員權限。", ephemeral=True)
@@ -769,19 +731,14 @@ async def list_recurring_tasks(interaction: discord.Interaction):
         else:
             u_id = r_id if s_id == 0 else s_id
             target_str = f"用戶 <@{u_id}>"
-        
         type_str = "國家撥款" if s_id == 0 else "國家扣款"
-        embed.add_field(
-            name=f"任務 ID: {t_id} | {type_str}",
-            value=f"* 對象: {target_str}\n* 金額: `{amt:,.2f}` 新亞圓\n* 時間: 每月 {r_day} 號 {r_hour}:00\n* 名義: `{memo}`",
-            inline=False
-        )
+        embed.add_field(name=f"任務 ID: {t_id} | {type_str}", value=f"* 對象: {target_str}\n* 金額: `{amt:,.2f}`\n* 時間: 每月 {r_day} 號 {r_hour}:00", inline=False)
 
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
-@bot.tree.command(name="取消國家定期任務", description="[管理員] 取消指定的國家定期撥款/扣款任務")
-@app_commands.describe(任務id="要取消的任務 ID（可用 /查看國家定期任務 查詢）")
+@bot.tree.command(name="取消國家定期任務", description="[管理員] 取消指定的國家定期任務")
+@app_commands.describe(任務id="要取消的任務 ID")
 async def cancel_recurring_task(interaction: discord.Interaction, 任務id: int):
     if not is_admin_check(interaction):
         await interaction.response.send_message("❌ 您沒有銀行管理員權限。", ephemeral=True)
@@ -798,54 +755,40 @@ async def cancel_recurring_task(interaction: discord.Interaction, 任務id: int)
     cursor.execute("DELETE FROM scheduled_tasks WHERE id = ?", (任務id,))
     conn.commit()
     conn.close()
-    await interaction.response.send_message(f"✅ 已成功取消任務 ID `{任務id}`！"
+    await interaction.response.send_message(f"✅ 已成功取消任務 ID `{任務id}`！")
+
 
 @bot.tree.command(name="幫助", description="檢視市營新亞銀行機器人的所有指令與說明")
 async def help_command(interaction: discord.Interaction):
-    embed = discord.Embed(
-        title="🏦 市營新亞銀行 - 系統指令幫助頁面",
-        description="歡迎使用新亞市中央銀行系統，以下為所有可用指令：",
-        color=discord.Color.green()
-    )
-
-    embed.add_field(
-        name="👤 一般用戶指令",
-        value=(
-            "• `/開戶` - 建立您的銀行帳戶（送開戶禮 100 新亞圓）\n"
-            "• `/銷戶` - 銷戶並清除個人銀行帳戶資料\n"
-            "• `/改名` - 變更您的帳戶名稱\n"
-            "• `/餘額` - 查看您當前的帳戶資產與個人頭像\n"
-            "• `/存款` - 存入資金至您的帳戶（日累計上限 3 萬新亞圓）\n"
-            "• `/提款` - 從帳戶提取資金\n"
-            "• `/轉帳` - 轉帳給他人（可選填單次預定）\n"
-            "• `/交易紀錄` - 查詢最近 10 筆收支明細\n"
-            "• `/幫助` - 顯示此說明頁面"
-        ),
-        inline=False
-    )
-
-    embed.add_field(
-        name="🛡️ 管理員指令",
-        value=(
-            "• `/設管理員身分組` - 指定銀行管理員身分組\n"
-            "• `/設銀行頻道` - 設定發布資訊與年終決算頻道（到帳與扣款通知亦會在此發布）\n"
-            "• `/國家帳戶餘額` - 查看新亞市國家帳戶資產\n"
-            "• `/查看已開戶用戶` - 查看所有已開戶市民的名單與資產\n"
-            "• `/國家定期轉帳扣款` - 設定國家每月對【個人或身分組】定期撥款/扣款\n"
-            "• `/查看國家定期任務` - 列出所有運行中的國家定期任務與 ID\n"
-            "• `/取消國家定期任務` - 取消特定的定期任務\n"
-            "• `/批量身分組開戶` - 為選取身分組內全體未開戶成員自動開戶\n"
-            "• *(系統自動)* 每年 12 月 31 日自動發布「# 新亞市政府總決算」報告"
-        ),
-        inline=False
-    )
-
+    embed = discord.Embed(title="🏦 市營新亞銀行 - 系統指令幫助頁面", description="歡迎使用新亞市中央銀行系統：", color=discord.Color.green())
+    embed.add_field(name="👤 一般用戶指令", value="• `/開戶 [用戶名]`\n• `/銷戶`\n• `/改名 [新用戶名]`\n• `/餘額`\n• `/存款 [金額] [名義]`\n• `/提款 [金額]`\n• `/轉帳 [對象] [金額] [名義]`\n• `/交易紀錄`", inline=False)
+    embed.add_field(name="🛡️ 管理員指令", value="• `/設管理員身分組 [身分組]`\n• `/設銀行頻道 [頻道]`\n• `/國家帳戶餘額`\n• `/查看已開戶用戶`\n• `/批量身分組開戶 [身分組]`\n• `/國家定期轉帳扣款`\n• `/查看國家定期任務`\n• `/取消國家定期任務 [任務id]`", inline=False)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
-# 啟動機器人
+# ==================== 啟動與防崩潰無限重連 ====================
 TOKEN = os.getenv("DISCORD_TOKEN")
+
 if not TOKEN:
     print("錯誤：找不到 DISCORD_TOKEN 環境變數！")
 else:
-    bot.run(TOKEN)
+    async def main():
+        while True:
+            try:
+                print("正在連線至 Discord 伺服器...")
+                await bot.start(TOKEN)
+            except discord.errors.HTTPException as e:
+                if e.status == 429:
+                    print("⚠️ 觸發 Discord API Rate Limit，等待 60 秒...")
+                    await asyncio.sleep(60)
+                else:
+                    print(f"❌ 網路異常：{e}，10 秒後重試...")
+                    await asyncio.sleep(10)
+            except Exception as e:
+                print(f"🚨 連線崩潰：{e}，10 秒後重啟...")
+                await asyncio.sleep(10)
+
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("機器人已手動停止。")
