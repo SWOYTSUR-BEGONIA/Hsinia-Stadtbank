@@ -573,34 +573,47 @@ async def transfer(interaction: discord.Interaction, 對象: discord.User, 金�
         await interaction.response.send_message(f"✅ 成功轉帳 `{金額:,.2f}` 新亞圓給 {對象.mention}！名義：`{名義}`")
 
 
-@bot.tree.command(name="交易紀錄", description="查看您的近期交易歷史")
+@bot.tree.command(name="交易紀錄", description="查看您的交易歷史紀錄")
 async def history(interaction: discord.Interaction):
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    uid = interaction.user.id
-    cursor.execute("""SELECT sender_id, receiver_id, amount, memo, timestamp, type 
+  conn = sqlite3.connect(DB_FILE)
+  cursor = conn.cursor()
+  uid = interaction.user.id
+  cursor.execute(
+      """SELECT sender_id, receiver_id, amount, memo, timestamp, type 
                        FROM transactions WHERE sender_id = ? OR receiver_id = ? 
-                       ORDER BY id DESC LIMIT 10""", (uid, uid))
-    rows = cursor.fetchall()
-    conn.close()
+                       ORDER BY id DESC""",
+      (uid, uid),
+  )
+  rows = cursor.fetchall()
+  conn.close()
 
-    if not rows:
-        await interaction.response.send_message("📜 目前沒有任何交易紀錄。", ephemeral=True)
-        return
+  if not rows:
+    await interaction.response.send_message(
+        "📜 目前沒有任何交易紀錄。", ephemeral=True
+    )
+    return
 
-    embed = discord.Embed(title="📜 最近 10 筆交易紀錄", color=discord.Color.blue())
-    for r in rows:
-        sender_id, receiver_id, amount, memo, timestamp, t_type = r
-        direction = "支出" if sender_id == uid else "收入"
-        if sender_id == receiver_id:
-            direction = t_type
-        embed.add_field(
-            name=f"[{direction}] {amount:,.2f} 新亞圓",
-            value=f"備忘/名義: `{memo}`\n時間: `{timestamp.replace('T', ' ')[:19]}`",
-            inline=False
-        )
+  data_list = []
+  for r in rows:
+    sender_id, receiver_id, amount, memo, timestamp, t_type = r
+    direction = "支出" if sender_id == uid else "收入"
+    if sender_id == receiver_id:
+      direction = t_type
+    data_list.append(
+        f"**[{direction}] {amount:,.2f} 新亞圓**\n* 備忘/名義: `{memo}`\n* 時間:"
+        f" `{timestamp.replace('T', ' ')[:19]}`"
+    )
 
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+  paginator = PaginatorView(
+      data_list=data_list,
+      title="📜 個人交易歷史紀錄",
+      page_size=5,
+      color=discord.Color.blue(),
+  )
+
+  await interaction.response.send_message(
+      embed=paginator.get_current_embed(), view=paginator, ephemeral=True
+  )
 
 
 # ==================== 管理員指令 ====================
@@ -645,39 +658,53 @@ async def national_balance(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
-@bot.tree.command(name="查看已開戶用戶", description="[管理員] 查看所有已開戶的用戶名單與資產")
+@bot.tree.command(
+    name="查看已開戶用戶", description="[管理員] 查看所有已開戶的用戶名單與資產"
+)
 async def list_registered_users(interaction: discord.Interaction):
-    if not is_admin_check(interaction):
-        await interaction.response.send_message("❌ 您沒有銀行管理員權限。", ephemeral=True)
-        return
+  if not is_admin_check(interaction):
+    await interaction.response.send_message(
+        "❌ 您沒有銀行管理員權限。", ephemeral=True
+    )
+    return
 
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute("SELECT discord_id, username, balance, created_at FROM users WHERE discord_id != 0 ORDER BY created_at DESC")
-    rows = cursor.fetchall()
-    conn.close()
+  conn = sqlite3.connect(DB_FILE)
+  cursor = conn.cursor()
+  cursor.execute(
+      "SELECT discord_id, username, balance, created_at FROM users WHERE"
+      " discord_id != 0 ORDER BY created_at DESC"
+  )
+  rows = cursor.fetchall()
+  conn.close()
 
-    if not rows:
-        await interaction.response.send_message("📋 目前尚無任何一般市民開戶。", ephemeral=True)
-        return
+  if not rows:
+    await interaction.response.send_message(
+        "📋 目前尚無任何一般市民開戶。", ephemeral=True
+    )
+    return
 
-    embed = discord.Embed(title="📋 新亞銀行 - 已開戶市民名單", color=discord.Color.purple())
-    
-    description_list = []
-    for r in rows:
-        d_id, uname, bal, created = r
-        time_str = created.replace('T', ' ')[:16] if created else "未知"
-        description_list.append(f"• **{uname}** (<@{d_id}>)\n  * 餘額：`{bal:,.2f}` 新亞圓\n  * 開戶時間：`{time_str}`")
+  # 組裝每筆資料格式
+  data_list = []
+  for r in rows:
+    d_id, uname, bal, created = r
+    time_str = created.replace("T", " ")[:16] if created else "未知"
+    data_list.append(
+        f"• **{uname}** (<@{d_id}>)\n  * 餘額：`{bal:,.2f}` 新亞圓\n  * 開戶時間："
+        f"`{time_str}`"
+    )
 
-    chunked_desc = "\n\n".join(description_list)
-    if len(chunked_desc) > 4000:
-        chunked_desc = chunked_desc[:3950] + "\n...(名單過長，僅顯示部分)"
+  # 實例化分頁元件 (例如每頁 5 筆)
+  paginator = PaginatorView(
+      data_list=data_list,
+      title="📋 新亞銀行 - 已開戶市民名單",
+      page_size=5,
+      color=discord.Color.purple(),
+  )
 
-    embed.description = chunked_desc
-    embed.set_footer(text=f"總計開戶人數：{len(rows)} 人")
-
-    await interaction.response.send_message(embed=embed, ephemeral=True)
-
+  # 發送第一頁內容與分頁按鈕
+  await interaction.response.send_message(
+      embed=paginator.get_current_embed(), view=paginator, ephemeral=True
+  )
 
 @bot.tree.command(name="批量身分組開戶", description="[管理員] 為選取身分組內的所有未開戶成員自動批次開戶")
 @app_commands.describe(目標身分組="選擇要自動開戶的身分組")
