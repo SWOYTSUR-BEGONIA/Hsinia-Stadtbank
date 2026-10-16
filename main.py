@@ -747,6 +747,60 @@ async def cancel_recurring_task(interaction: discord.Interaction, 任務id: int)
     conn.close()
     await interaction.response.send_message(f"✅ 已成功取消任務 ID `{任務id}`！")
 
+@bot.tree.command(name="批量身分組開戶", description="[管理員] 為選取身分組內的所有未開戶成員自動批次開戶")
+@app_commands.describe(目標身分組="選擇要自動開戶的身分組")
+async def batch_register_role(interaction: discord.Interaction, 目標身分組: discord.Role):
+    if not is_admin_check(interaction):
+        await interaction.response.send_message("❌ 您沒有銀行管理員權限。", ephemeral=True)
+        return
+
+    # 防止開戶人數過多導致 Discord 3 秒超時，先延遲回應
+    await interaction.response.defer(ephemeral=True)
+
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+
+    success_count = 0
+    skipped_count = 0
+
+    for member in 目標身分組.members:
+        if member.bot:  # 自動跳過機器人
+            continue
+
+        cursor.execute("SELECT * FROM users WHERE discord_id = ?", (member.id,))
+        if cursor.fetchone():
+            skipped_count += 1
+            continue
+
+        # 以成員的顯示名稱作為預設帳戶名，若有重複則自動加上數字編號
+        base_username = member.display_name
+        final_username = base_username
+        counter = 1
+
+        while True:
+            cursor.execute("SELECT * FROM users WHERE username = ?", (final_username,))
+            if not cursor.fetchone():
+                break
+            final_username = f"{base_username}_{counter}"
+            counter += 1
+
+        # 寫入開戶資料，每人獲得 100 新亞圓開戶禮金
+        cursor.execute(
+            "INSERT INTO users (discord_id, username, balance, created_at) VALUES (?, ?, ?, ?)",
+            (member.id, final_username, 100.0, datetime.now().isoformat())
+        )
+        success_count += 1
+
+    conn.commit()
+    conn.close()
+
+    await interaction.followup.send(
+        f"✅ **批量身分組開戶完成！**\n"
+        f"* 目標身分組：{目標身分組.mention}\n"
+        f"* 成功自動開戶：`{success_count}` 人（每人獲贈 100.00 新亞圓禮金）\n"
+        f"* 已擁有帳戶跳過：`{skipped_count}` 人"
+    )
+
 
 @bot.tree.command(name="幫助", description="檢視市營新亞銀行機器人的所有指令與說明")
 async def help_command(interaction: discord.Interaction):
@@ -759,13 +813,13 @@ async def help_command(interaction: discord.Interaction):
     embed.add_field(
         name="👤 一般用戶指令",
         value=(
-            "• `/開戶 [用戶名]` - 建立您的銀行帳戶（送開戶禮 100 新亞圓）\n"
+            "• `/開戶` - 建立您的銀行帳戶（送開戶禮 100 新亞圓）\n"
             "• `/銷戶` - 銷戶並清除個人銀行帳戶資料\n"
-            "• `/改名 [新用戶名]` - 變更您的帳戶名稱\n"
+            "• `/改名` - 變更您的帳戶名稱\n"
             "• `/餘額` - 查看您當前的帳戶資產與個人頭像\n"
-            "• `/存款 [金額] [名義]` - 存入資金至您的帳戶（日累計上限 3 萬新亞圓）\n"
-            "• `/提款 [金額]` - 從帳戶提取資金\n"
-            "• `/轉帳 [對象] [金額] [名義] [延遲分鐘數]` - 轉帳給他人（可選填單次預定）\n"
+            "• `/存款` - 存入資金至您的帳戶（日累計上限 3 萬新亞圓）\n"
+            "• `/提款` - 從帳戶提取資金\n"
+            "• `/轉帳` - 轉帳給他人（可選填單次預定）\n"
             "• `/交易紀錄` - 查詢最近 10 筆收支明細\n"
             "• `/幫助` - 顯示此說明頁面"
         ),
@@ -773,15 +827,16 @@ async def help_command(interaction: discord.Interaction):
     )
 
     embed.add_field(
-        name="🛡️ 管理員/政府機構指令",
+        name="🛡️ 管理員指令",
         value=(
-            "• `/設管理員身分組 [身分組]` - 指定銀行管理員身分組\n"
-            "• `/設銀行頻道 [頻道]` - 設定發布資訊與年終決算頻道（到帳與扣款通知亦會在此發布）\n"
+            "• `/設管理員身分組` - 指定銀行管理員身分組\n"
+            "• `/設銀行頻道` - 設定發布資訊與年終決算頻道（到帳與扣款通知亦會在此發布）\n"
             "• `/國家帳戶餘額` - 查看新亞市國家帳戶資產\n"
             "• `/查看已開戶用戶` - 查看所有已開戶市民的名單與資產\n"
             "• `/國家定期轉帳扣款` - 設定國家每月對【個人或身分組】定期撥款/扣款\n"
             "• `/查看國家定期任務` - 列出所有運行中的國家定期任務與 ID\n"
-            "• `/取消國家定期任務 [任務id]` - 取消特定的定期任務\n"
+            "• `/取消國家定期任務` - 取消特定的定期任務\n"
+            "• `/批量身分組開戶` - 為選取身分組內全體未開戶成員自動開戶\n"
             "• *(系統自動)* 每年 12 月 31 日自動發布「# 新亞市政府總決算」報告"
         ),
         inline=False
