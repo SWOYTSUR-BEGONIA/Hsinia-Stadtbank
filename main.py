@@ -848,9 +848,29 @@ async def help_command(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
-# 啟動機器人（優先讀取環境變數，若無則讀取預設值）
+# 啟動機器人與自動重連機制
 TOKEN = os.getenv("DISCORD_TOKEN")
+
 if not TOKEN:
-    print("錯誤：找不到 DISCORD_TOKEN 環境變數！請確認環境變數或 .env 設定。")
+  print("錯誤：找不到 DISCORD_TOKEN 環境變數！")
 else:
-    bot.run(TOKEN)
+
+  async def main():
+    while True:
+      try:
+        await bot.start(TOKEN)
+      except discord.errors.HTTPException as e:
+        if e.status == 429:
+          print("⚠️ 觸發 Discord Rate Limit，將於 60 秒後嘗試重新連線...")
+          await asyncio.sleep(60)
+        else:
+          print(f"❌ 網路或 HTTP 異常：{e}，10 秒後重新連線...")
+          await asyncio.sleep(10)
+      except Exception as e:
+        print(f"🚨 機器人發生未預期崩潰：{e}，10 秒後自動重啟...")
+        await asyncio.sleep(10)
+
+  try:
+    asyncio.run(main())
+  except KeyboardInterrupt:
+    print("機器人已手動停止。")
