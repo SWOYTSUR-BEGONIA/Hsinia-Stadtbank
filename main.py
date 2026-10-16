@@ -14,73 +14,6 @@ load_dotenv()
 # 資料庫路徑：支援從環境變數讀取，預設為 bank.db
 DB_FILE = os.getenv("DB_PATH", "bank.db")
 
-class PaginatorView(discord.ui.View):
-
-  def __init__(
-      self,
-      data_list,
-      title="📋 清單列表",
-      page_size=5,
-      color=discord.Color.blue(),
-  ):
-    super().__init__(timeout=180)  # 按鈕 180 秒後自動失效
-    self.data_list = data_list  # 完整的資料清單 (每筆資料為字串)
-    self.title = title
-    self.page_size = page_size
-    self.color = color
-    self.current_page = 0
-    # 計算總頁數
-    self.total_pages = max(
-        1, (len(data_list) + page_size - 1) // page_size
-    )
-
-    self.update_buttons()
-
-  def get_current_embed(self) -> discord.Embed:
-    start_idx = self.current_page * self.page_size
-    end_idx = start_idx + self.page_size
-    page_data = self.data_list[start_idx:end_idx]
-
-    embed = discord.Embed(
-        title=self.title,
-        description="\n\n".join(page_data),
-        color=self.color,
-    )
-    embed.set_footer(
-        text=(
-            f"第 {self.current_page + 1} / {self.total_pages} 頁（總計"
-            f" {len(self.data_list)} 筆資料）"
-        )
-    )
-    return embed
-
-  def update_buttons(self):
-    # 當第一頁時禁用上一頁，最後一頁時禁用下一頁
-    self.prev_button.disabled = self.current_page == 0
-    self.next_button.disabled = self.current_page >= self.total_pages - 1
-
-  @discord.ui.button(label="◀️ 上一頁", style=discord.ButtonStyle.primary)
-  async def prev_button(
-      self, interaction: discord.Interaction, button: discord.ui.Button
-  ):
-    if self.current_page > 0:
-      self.current_page -= 1
-      self.update_buttons()
-      await interaction.response.edit_message(
-          embed=self.get_current_embed(), view=self
-      )
-
-  @discord.ui.button(label="下一頁 ▶️", style=discord.ButtonStyle.primary)
-  async def next_button(
-      self, interaction: discord.Interaction, button: discord.ui.Button
-  ):
-    if self.current_page < self.total_pages - 1:
-      self.current_page += 1
-      self.update_buttons()
-      await interaction.response.edit_message(
-          embed=self.get_current_embed(), view=self
-      )
-
 
 def init_db():
     db_dir = os.path.dirname(DB_FILE)
@@ -154,6 +87,72 @@ intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+class PaginatorView(discord.ui.View):
+
+  def __init__(
+      self,
+      data_list,
+      title="📋 清單列表",
+      page_size=5,
+      color=discord.Color.blue(),
+  ):
+    super().__init__(timeout=180)  # 按鈕 180 秒後自動失效
+    self.data_list = data_list  # 完整的資料清單 (每筆資料為字串)
+    self.title = title
+    self.page_size = page_size
+    self.color = color
+    self.current_page = 0
+    # 計算總頁數
+    self.total_pages = max(
+        1, (len(data_list) + page_size - 1) // page_size
+    )
+
+    self.update_buttons()
+
+  def get_current_embed(self) -> discord.Embed:
+    start_idx = self.current_page * self.page_size
+    end_idx = start_idx + self.page_size
+    page_data = self.data_list[start_idx:end_idx]
+
+    embed = discord.Embed(
+        title=self.title,
+        description="\n\n".join(page_data),
+        color=self.color,
+    )
+    embed.set_footer(
+        text=(
+            f"第 {self.current_page + 1} / {self.total_pages} 頁（總計"
+            f" {len(self.data_list)} 筆資料）"
+        )
+    )
+    return embed
+
+  def update_buttons(self):
+    # 當第一頁時禁用上一頁，最後一頁時禁用下一頁
+    self.prev_button.disabled = self.current_page == 0
+    self.next_button.disabled = self.current_page >= self.total_pages - 1
+
+  @discord.ui.button(label="◀️ 上一頁", style=discord.ButtonStyle.primary)
+  async def prev_button(
+      self, interaction: discord.Interaction, button: discord.ui.Button
+  ):
+    if self.current_page > 0:
+      self.current_page -= 1
+      self.update_buttons()
+      await interaction.response.edit_message(
+          embed=self.get_current_embed(), view=self
+      )
+
+  @discord.ui.button(label="下一頁 ▶️", style=discord.ButtonStyle.primary)
+  async def next_button(
+      self, interaction: discord.Interaction, button: discord.ui.Button
+  ):
+    if self.current_page < self.total_pages - 1:
+      self.current_page += 1
+      self.update_buttons()
+      await interaction.response.edit_message(
+          embed=self.get_current_embed(), view=self
+      )
 
 def get_config(key):
     conn = sqlite3.connect(DB_FILE)
