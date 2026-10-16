@@ -614,6 +614,59 @@ async def list_registered_users(interaction: discord.Interaction):
 
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
+@bot.tree.command(name="批量身分組開戶", description="[管理員] 為選取身分組內的所有未開戶成員自動批次開戶")
+@app_commands.describe(目標身分組="選擇要自動開戶的身分組")
+async def batch_register_role(interaction: discord.Interaction, 目標身分組: discord.Role):
+    if not is_admin_check(interaction):
+        await interaction.response.send_message("❌ 您沒有銀行管理員權限。", ephemeral=True)
+        return
+
+    # 防止開戶人數過多導致 Discord 3 秒超時，先延遲回應
+    await interaction.response.defer(ephemeral=True)
+
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+
+    success_count = 0
+    skipped_count = 0
+
+    for member in 目標身分組.members:
+        if member.bot:  # 自動跳過機器人
+            continue
+
+        cursor.execute("SELECT * FROM users WHERE discord_id = ?", (member.id,))
+        if cursor.fetchone():
+            skipped_count += 1
+            continue
+
+        # 以成員的顯示名稱作為預設帳戶名，若有重複則自動加上數字編號
+        base_username = member.display_name
+        final_username = base_username
+        counter = 1
+
+        while True:
+            cursor.execute("SELECT * FROM users WHERE username = ?", (final_username,))
+            if not cursor.fetchone():
+                break
+            final_username = f"{base_username}_{counter}"
+            counter += 1
+
+        # 寫入開戶資料，每人獲得 100 新亞圓開戶禮金
+        cursor.execute(
+            "INSERT INTO users (discord_id, username, balance, created_at) VALUES (?, ?, ?, ?)",
+            (member.id, final_username, 100.0, datetime.now().isoformat())
+        )
+        success_count += 1
+
+    conn.commit()
+    conn.close()
+
+    await interaction.followup.send(
+        f"✅ **批量身分組開戶完成！**\n"
+        f"* 目標身分組：{目標身分組.mention}\n"
+        f"* 成功自動開戶：`{success_count}` 人（每人獲贈 100.00 新亞圓禮金）\n"
+        f"* 已擁有帳戶跳過：`{skipped_count}` 人"
+    )
 
 @bot.tree.command(name="國家定期轉帳扣款", description="[管理員] 設定國家對用戶或身分組的定期撥款/扣款")
 @app_commands.choices(對象類型=[
@@ -625,7 +678,7 @@ async def list_registered_users(interaction: discord.Interaction):
     金額="金額（正數為國家撥款，負數為國家扣款）",
     名義="財政收支事由/備忘",
     每月幾號="每月幾號執行（1-31號）",
-    執行小時="幾點執行（0-23時）",
+    執行小時="幾點執行（0-24時）",
     目標用戶="（若選個別用戶）選擇對象",
     目標身分組="（若選身分組）選擇對象身分組"
 )
@@ -643,8 +696,8 @@ async def national_recurring(
         await interaction.response.send_message("❌ 您沒有銀行管理員權限。", ephemeral=True)
         return
 
-    if not (1 <= 每月幾號 <= 31) or not (0 <= 執行小時 <= 23):
-        await interaction.response.send_message("❌ 日期請設定在 1-31 之間，小時請設定在 0-23 之間。", ephemeral=True)
+    if not (1 <= 每月幾號 <= 31) or not (0 <= 執行小時 <= 24):
+        await interaction.response.send_message("❌ 日期請設定在 1-31 之間，小時請設定在 0-24 之間。", ephemeral=True)
         return
 
     if 對象類型 == "user" and not 目標用戶:
@@ -745,62 +798,7 @@ async def cancel_recurring_task(interaction: discord.Interaction, 任務id: int)
     cursor.execute("DELETE FROM scheduled_tasks WHERE id = ?", (任務id,))
     conn.commit()
     conn.close()
-    await interaction.response.send_message(f"✅ 已成功取消任務 ID `{任務id}`！")
-
-@bot.tree.command(name="批量身分組開戶", description="[管理員] 為選取身分組內的所有未開戶成員自動批次開戶")
-@app_commands.describe(目標身分組="選擇要自動開戶的身分組")
-async def batch_register_role(interaction: discord.Interaction, 目標身分組: discord.Role):
-    if not is_admin_check(interaction):
-        await interaction.response.send_message("❌ 您沒有銀行管理員權限。", ephemeral=True)
-        return
-
-    # 防止開戶人數過多導致 Discord 3 秒超時，先延遲回應
-    await interaction.response.defer(ephemeral=True)
-
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-
-    success_count = 0
-    skipped_count = 0
-
-    for member in 目標身分組.members:
-        if member.bot:  # 自動跳過機器人
-            continue
-
-        cursor.execute("SELECT * FROM users WHERE discord_id = ?", (member.id,))
-        if cursor.fetchone():
-            skipped_count += 1
-            continue
-
-        # 以成員的顯示名稱作為預設帳戶名，若有重複則自動加上數字編號
-        base_username = member.display_name
-        final_username = base_username
-        counter = 1
-
-        while True:
-            cursor.execute("SELECT * FROM users WHERE username = ?", (final_username,))
-            if not cursor.fetchone():
-                break
-            final_username = f"{base_username}_{counter}"
-            counter += 1
-
-        # 寫入開戶資料，每人獲得 100 新亞圓開戶禮金
-        cursor.execute(
-            "INSERT INTO users (discord_id, username, balance, created_at) VALUES (?, ?, ?, ?)",
-            (member.id, final_username, 100.0, datetime.now().isoformat())
-        )
-        success_count += 1
-
-    conn.commit()
-    conn.close()
-
-    await interaction.followup.send(
-        f"✅ **批量身分組開戶完成！**\n"
-        f"* 目標身分組：{目標身分組.mention}\n"
-        f"* 成功自動開戶：`{success_count}` 人（每人獲贈 100.00 新亞圓禮金）\n"
-        f"* 已擁有帳戶跳過：`{skipped_count}` 人"
-    )
-
+    await interaction.response.send_message(f"✅ 已成功取消任務 ID `{任務id}`！"
 
 @bot.tree.command(name="幫助", description="檢視市營新亞銀行機器人的所有指令與說明")
 async def help_command(interaction: discord.Interaction):
